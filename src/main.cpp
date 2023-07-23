@@ -1,6 +1,9 @@
 
 #define ESP32
 #define ETL_CALLBACK_TIMER_USE_ATOMIC_LOCK
+#define LV_TICK_PERIOD_MS 1
+
+#define LV_USE_DEMO_WIDGETS 0
 
 // Stdlibs
 #include <stdbool.h>
@@ -19,6 +22,32 @@
 // Arduino Core
 #include "arduino-esp32/cores/esp32/Arduino.h"
 
+/* Littlevgl specific */
+#ifdef LV_LVGL_H_INCLUDE_SIMPLE
+#include "lvgl.h"
+#else
+#include "lvgl/lvgl.h"
+#endif
+
+#include "lvgl_helpers.h"
+
+#include "lv_examples/lv_examples.h"
+#include "lv_examples/src/lv_demo_widgets/lv_demo_widgets.h"
+#include "lvgl_touch/touch_driver.h"
+
+/**********************
+ *  STATIC PROTOTYPES
+ **********************/
+static void lv_tick_task(void *arg);
+static void guiTask(void *pvParameter);
+static void applicationTask(void *pvParameter);
+
+/**********************
+ *  GLOBAL VARIABLES
+ **********************/
+
+// Lock on this any time you make a call to LVGL functions from another task
+SemaphoreHandle_t xGuiSemaphore;
 
 
 /**********************
@@ -34,35 +63,6 @@ void app_main()
     initArduino();
     Serial.begin(115200);
 
-    // Setup input / outputs
-    pinMode(TOP_BUTTON_PIN, INPUT_PULLUP);
-    pinMode(MIDDLE_BUTTON_PIN, INPUT_PULLUP);
-    pinMode(BOTTOM_BUTTON_PIN, INPUT_PULLUP);
-    pinMode(EXT_POWER_OK, INPUT);
-    pinMode(EN_ACC_PWR_PIN, OUTPUT);
-    adcAttachPin(BATTERY_ADC);
-
-    VibrationService::Begin(VIB_MOTOR_PIN, 5000);
-
-    // Enable a wake-up button from deep sleep
-    esp_sleep_enable_ext0_wakeup(BOTTOM_BUTTON_PIN, LOW);
-
-    // Check external power
-    Serial.printf("External power: %s\n", digitalRead(EXT_POWER_OK) == HIGH ? "Good" : "Bad");
-
-    // Enable the accessory power (Screen, RFID, Vibration Motor, Light Sensor)
-    digitalWrite(EN_ACC_PWR_PIN, HIGH);
-
-    attachInterrupt(TOP_BUTTON_PIN, TopButtonInterrupt, CHANGE);
-    attachInterrupt(BOTTOM_BUTTON_PIN, BottomButtonInterrupt, CHANGE);
-    attachInterrupt(MIDDLE_BUTTON_PIN, MiddleButtonInterrupt, CHANGE);
-
-    // Start any core services here
-    MainThread.Begin();
-    settingsService.Begin();
-
-    // Create the button event handling task
-    xTaskCreatePinnedToCore(buttonEventTask, "buttons", 2048, NULL, 2, NULL, 1);
 
     // Create the GUI task for LVGL
     // TODO: Check if changing the gui/application task priority has any effect on ui/app performance
@@ -74,6 +74,8 @@ void app_main()
     // This task handles the view and model lifetimes and is where most app functionality occurs
     // TODO: Check memory performance and add in the high-water-mark functionality for task stacks
     xTaskCreate(applicationTask, "application", 2048*8, NULL, 1, NULL);
+
+    
 }
 
 static void guiTask(void *pvParameter) 
@@ -118,6 +120,16 @@ static void guiTask(void *pvParameter)
         ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
         ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, LV_TICK_PERIOD_MS * 1000));
 
+        // Set up input device
+        lv_indev_drv_t indev_drv;
+        lv_indev_drv_init(&indev_drv);
+        indev_drv.type = LV_INDEV_TYPE_POINTER;
+        indev_drv.read_cb = touch_driver_read;
+        /*Register the driver in LVGL and save the created input device object*/
+        lv_indev_t * my_indev = lv_indev_drv_register(&indev_drv);
+
+        touch_driver_init();
+
         // Release the semaphore now that we're done setting up
         xSemaphoreGiveRecursive(xGuiSemaphore);
     }
@@ -135,7 +147,18 @@ static void guiTask(void *pvParameter)
     vTaskDelete(NULL);
 }
 
-static void lv_tick_task(void *arg) {
+static void applicationTask(void *pvParameter)
+{
+    lv_demo_widgets();
+
+    while(true)
+    {
+        vTaskDelay(portMAX_DELAY);
+    }
+}
+
+static void lv_tick_task(void *arg) 
+{
     (void) arg;
 
     lv_tick_inc(LV_TICK_PERIOD_MS);
